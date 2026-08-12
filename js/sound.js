@@ -1,77 +1,138 @@
-// ===== 语音功能模块 (Web Speech API) =====
+// ===== 语音功能模块 =====
+// 优先使用预生成的音频文件（任何浏览器都能出声，兼容手机自带浏览器/微信）
+// 当音频文件加载失败时，回退到 Web Speech API
 
 const Speech = (() => {
-  let synth = null;
   let speaking = false;
-  let voice = null;
+  let currentAudio = null;
 
-  // 初始化语音合成
-  function init() {
-    if (!('speechSynthesis' in window)) {
-      console.warn('此浏览器不支持语音合成');
-      return false;
-    }
-    synth = window.speechSynthesis;
-    loadVoice();
-    return true;
+  // ---------- 预生成音频播放 ----------
+  function playAudio(src, fallbackFn) {
+    stop(); // 先停止上一次朗读
+    const audio = new Audio(src);
+    currentAudio = audio;
+
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (ok) => { if (!done) { done = true; speaking = false; resolve(ok); } };
+
+      audio.onplay = () => { speaking = true; };
+      audio.onended = () => finish(true);
+      audio.onerror = () => {
+        // 音频加载失败，回退到 TTS
+        finish(false);
+        if (fallbackFn) fallbackFn();
+      };
+      audio.play().catch(() => {
+        finish(false);
+        if (fallbackFn) fallbackFn();
+      });
+    });
   }
 
-  // 加载中文语音
+  // ---------- Web Speech API 兜底 ----------
+  let synth = null;
+  let voice = null;
+
   function loadVoice() {
     if (!synth) return;
     const voices = synth.getVoices();
-    // 优先选择中文女声
-    voice = voices.find(v => v.lang === 'zh-CN' && /female|woman|xiaoxiao|yaoyao|tingting/i.test(v.name))
+    if (!voices || voices.length === 0) return;
+    voice = voices.find(v => v.lang === 'zh-CN' && /female|woman|xiaoxiao|yaoyao|tingting|meijia|huihui/i.test(v.name))
          || voices.find(v => v.lang === 'zh-CN')
          || voices.find(v => v.lang.startsWith('zh'))
          || null;
   }
 
-  // 浏览器可能异步加载语音，需要监听
-  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+  function initTTS() {
+    if (!('speechSynthesis' in window)) return false;
+    synth = window.speechSynthesis;
+    loadVoice();
     window.speechSynthesis.onvoiceschanged = () => { loadVoice(); };
+    setTimeout(loadVoice, 300);
+    setTimeout(loadVoice, 1000);
+    return true;
   }
 
-  // 朗读文本
-  function speak(text, options = {}) {
+  function speakTTS(text, options = {}) {
     if (!synth) return false;
-    // 取消之前的朗读
-    synth.cancel();
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = options.lang || 'zh-CN';
-    utterance.rate = options.rate || 0.8;  // 稍慢适合小朋友
-    utterance.pitch = options.pitch || 1.1;  // 稍高，更亲切
-    utterance.volume = 1.0;
-
-    if (voice) utterance.voice = voice;
-
-    utterance.onstart = () => { speaking = true; };
-    utterance.onend = () => { speaking = false; };
-    utterance.onerror = () => { speaking = false; };
-
-    synth.speak(utterance);
+    if (!voice) loadVoice();
+    try { synth.cancel(); } catch(e) {}
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = options.lang || 'zh-CN';
+    u.rate = options.rate || 0.8;
+    u.pitch = options.pitch || 1.1;
+    u.volume = 1.0;
+    if (voice) u.voice = voice;
+    u.onstart = () => { speaking = true; };
+    u.onend = () => { speaking = false; };
+    u.onerror = () => { speaking = false; };
+    try { if (synth.paused) synth.resume(); } catch(e) {}
+    synth.speak(u);
     return true;
+  }
+
+  // ---------- 对外接口 ----------
+
+  // 通用朗读（先用预生成短语匹配，否则回退 TTS）
+  function speak(text, options = {}) {
+    // 尝试匹配预生成短语
+    const phrases = {
+      "新的开始，加油！": "phrase_new_start.mp3",
+      "全部配对成功，再来一局！": "phrase_pair_done.mp3",
+      "要先完成上一关哦！": "phrase_level_locked.mp3",
+      "闯关成功，太棒了！": "phrase_level_done.mp3",
+      "太棒了，你真是个聪明的小侦探！": "phrase_detective.mp3",
+      "太棒了！": "praise_0.mp3",
+      "真厉害！": "praise_1.mp3",
+      "好聪明呀！": "praise_2.mp3",
+      "你真棒！": "praise_3.mp3",
+      "答对啦！": "praise_4.mp3",
+      "哇，好厉害！": "praise_5.mp3",
+      "再试一次！": "encourage_0.mp3",
+      "加油哦！": "encourage_1.mp3",
+      "没关系，再来！": "encourage_2.mp3",
+    };
+    if (phrases[text]) {
+      playAudio('audio/' + phrases[text], () => speakTTS(text, options));
+      return true;
+    }
+    return speakTTS(text, options);
   }
 
   // 朗读英文字母
   function speakLetter(letter) {
-    return speak(letter, { lang: 'en-US', rate: 0.7, pitch: 1.2 });
+    playAudio(`audio/letter_${letter}.mp3`, () => speakTTS(letter, { lang: 'en-US', rate: 0.7, pitch: 1.2 }));
+    return true;
   }
 
-  // 朗读数字
+  // 朗读数字（中文）
   function speakNumber(number) {
-    // 使用中文读数字
-    return speak(`数字 ${number}`);
+    playAudio(`audio/num_${number}.mp3`, () => speakTTS(`数字 ${number}`));
+    return true;
   }
 
   // 朗读古诗全文
   function speakPoem(poem) {
+    // 通过古诗标题映射到音频索引
+    const poemIndexMap = {
+      "静夜思": 0, "咏鹅": 1, "春晓": 2, "登鹳雀楼": 3,
+      "悯农": 4, "江南": 5, "小池": 6, "望庐山瀑布": 7
+    };
+    const idx = poemIndexMap[poem.title];
+    if (idx !== undefined) {
+      playAudio(`audio/poem_${idx}.mp3`, () => speakPoemTTS(poem));
+      return true;
+    }
+    return speakPoemTTS(poem);
+  }
+
+  function speakPoemTTS(poem) {
     let text = `${poem.title}，${poem.author}。`;
     poem.lines.forEach(line => {
       text += line.chars.map(c => c.c).join('') + line.punc;
     });
-    return speak(text, { rate: 0.75 });
+    return speakTTS(text, { rate: 0.75 });
   }
 
   // 表扬
@@ -90,6 +151,10 @@ const Speech = (() => {
 
   // 停止朗读
   function stop() {
+    if (currentAudio) {
+      try { currentAudio.pause(); currentAudio.currentTime = 0; } catch(e) {}
+      currentAudio = null;
+    }
     if (synth) synth.cancel();
     speaking = false;
   }
@@ -97,6 +162,12 @@ const Speech = (() => {
   // 是否正在朗读
   function isSpeaking() {
     return speaking;
+  }
+
+  // 初始化
+  function init() {
+    initTTS();
+    return true;
   }
 
   init();
